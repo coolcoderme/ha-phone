@@ -4,7 +4,14 @@ import java.util.Locale
 
 object Text {
     fun slug(value: String): String =
-        value.lowercase(Locale.US).replace("[^a-z0-9]+".toRegex(), "_").trim('_').ifBlank { "entity" }
+        value.lowercase(Locale.US).replace("[^a-z0-9]+".toRegex(), "_").trim('_')
+
+    fun formatTrigger(platform: String, at: String = "", entityId: String = "", to: String = ""): String =
+        when (platform) {
+            "time" -> "At ${at.ifBlank { "?" }}"
+            "state" -> "${entityId.ifBlank { "entity" }} becomes ${to.ifBlank { "any" }}"
+            else -> platform
+        }
 
     data class SsdpMessage(val location: String, val st: String, val server: String, val usn: String)
 

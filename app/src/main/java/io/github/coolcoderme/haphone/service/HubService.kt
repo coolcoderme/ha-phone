@@ -16,6 +16,7 @@ import io.github.coolcoderme.haphone.HaPhoneApp
 import io.github.coolcoderme.haphone.MainActivity
 import io.github.coolcoderme.haphone.R
 import io.github.coolcoderme.haphone.automation.AutomationEngine
+import io.github.coolcoderme.haphone.control.MqttBridge
 import io.github.coolcoderme.haphone.discovery.DiscoveryCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,9 +25,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.eclipse.paho.client.mqttv3.MqttClient
-import org.eclipse.paho.client.mqttv3.MqttConnectOptions
-import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 
 class HubService : Service() {
     private val job = SupervisorJob()
@@ -34,7 +32,6 @@ class HubService : Service() {
     private var server: HaWebServer? = null
     private var discovery: DiscoveryCoordinator? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var mqtt: MqttClient? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -49,8 +46,18 @@ class HubService : Service() {
         AutomationEngine(repo, scope).start()
         if (repo.prefs.webDashboard) {
             val port = repo.prefs.webPort
-            server = HaWebServer(this, repo, scope, port) { discovery?.scanNow() }
+            server = HaWebServer(
+                this,
+                repo,
+                scope,
+                port,
+                onScan = { discovery?.scanNow() },
+                onMqttReconnect = { connectMqtt(app) }
+            )
             runCatching { server?.start(60_000, false) }
+        }
+        MqttBridge.onMessage = { topic, _ ->
+            scope.launch { runCatching { repo.refreshMqttByTopic(topic) } }
         }
         scope.launch {
             repo.events.collect { event -> server?.broadcastEvent(event) }
@@ -72,40 +79,30 @@ class HubService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_SCAN) discovery?.scanNow()
+        if (intent?.action == ACTION_MQTT_RECONNECT) connectMqtt(application as HaPhoneApp)
         return START_STICKY
     }
 
     override fun onDestroy() {
         discovery?.stop()
         server?.stop()
-        runCatching { mqtt?.disconnect() }
+        MqttBridge.onMessage = null
+        MqttBridge.disconnect()
         wakeLock?.let { if (it.isHeld) it.release() }
         scope.cancel()
         super.onDestroy()
     }
 
     private fun connectMqtt(app: HaPhoneApp) {
-        val broker = app.prefs.mqttBroker
-        if (broker.isBlank()) return
         scope.launch {
-            runCatching {
-                val client = MqttClient(
-                    "tcp://$broker:${app.prefs.mqttPort}",
-                    "haphone-" + java.util.UUID.randomUUID().toString(),
-                    MemoryPersistence()
-                )
-                val opts = MqttConnectOptions().apply {
-                    isAutomaticReconnect = true
-                    isCleanSession = true
-                    connectionTimeout = 8
-                    if (app.prefs.mqttUser.isNotBlank()) {
-                        userName = app.prefs.mqttUser
-                        password = app.prefs.mqttPassword.toCharArray()
-                    }
-                }
-                client.connect(opts)
-                mqtt = client
-            }
+            val topics = runCatching { app.repo.mqttStateTopics() }.getOrDefault(emptyList())
+            MqttBridge.reconnect(
+                app.prefs.mqttBroker,
+                app.prefs.mqttPort,
+                app.prefs.mqttUser,
+                app.prefs.mqttPassword,
+                topics
+            )
         }
     }
 
@@ -143,6 +140,7 @@ class HubService : Service() {
         const val CHANNEL = "hub"
         const val ACTION_READY = "io.github.coolcoderme.haphone.HUB_READY"
         const val ACTION_SCAN = "io.github.coolcoderme.haphone.SCAN"
+        const val ACTION_MQTT_RECONNECT = "io.github.coolcoderme.haphone.MQTT_RECONNECT"
 
         fun start(context: Context) {
             val intent = Intent(context, HubService::class.java)
