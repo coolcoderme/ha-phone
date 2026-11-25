@@ -50,7 +50,7 @@ Add anything else by IP under **Devices → +**.
 - **Areas** — rooms you name; assign devices when adding or from the device.
 - **Scenes** — snapshot current on/off/brightness and restore later.
 - **Automations** — **time of day** (`07:00`) or **state** (`switch.x` → `on`), then call `turn_on` / `turn_off` / `toggle` on another entity.
-- State lives in a local Room database (survives restarts). **Settings → Backup** exports/imports JSON.
+- State lives in a local Room database (survives restarts and app upgrades via real schema migrations). **Settings → Backup** exports/imports JSON.
 
 ## LAN web UI
 
@@ -154,7 +154,7 @@ MIT for original ha-phone code (see [LICENSE](LICENSE)). Look-and-feel is inspir
 
 Verified in this repo’s environment when the APK job succeeds:
 
-- Gradle **unit tests** for Kasa codec, LIFX header size, SSDP parse, name slug, Shelly gen1/gen2 JSON, generic HTTP URL rules, last_changed stamps.
+- Gradle **unit tests** for Kasa codec, LIFX header size, SSDP parse, name slug, Shelly gen1/gen2 JSON, generic HTTP URL rules, last_changed stamps, JSON `roomId` null, Room v1→v2 migration SQL, and the coroutines `ClassValue` rewrite.
 - **APK build** (size reported on the PR / Actions log).
 
 Not verified here (no Android emulator / no real IoT hardware in this environment):

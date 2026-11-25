@@ -155,7 +155,7 @@ interface HubDao {
 @Database(
     entities = [DeviceRow::class, EntityRow::class, RoomRow::class, SceneRow::class, AutomationRow::class],
     version = 2,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): HubDao
@@ -163,7 +163,7 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "haphone.db")
-                .fallbackToDestructiveMigration()
+                .addMigrations(HubMigrations.MIGRATION_1_2)
                 .build()
     }
 }

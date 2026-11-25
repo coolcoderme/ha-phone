@@ -5,6 +5,7 @@ import io.github.coolcoderme.haphone.control.GenericHttp
 import io.github.coolcoderme.haphone.control.ShellyJson
 import io.github.coolcoderme.haphone.data.HubRepository
 import io.github.coolcoderme.haphone.data.db.EntityRow
+import io.github.coolcoderme.haphone.util.Json
 import io.github.coolcoderme.haphone.util.Text
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -94,5 +95,21 @@ class BugfixTest {
         val text = HubRepository.isoMillis(0L)
         assertTrue(text.startsWith("1970-01-01T"))
         assertTrue(text.endsWith("Z"))
+    }
+
+    @Test
+    fun optionalIdTreatsJsonNullAsMissing() {
+        val jsonNull = JSONObject().put("roomId", JSONObject.NULL)
+        assertEquals(null, Json.optionalId(jsonNull, "roomId"))
+        assertEquals(null, Json.optionalId(JSONObject(), "roomId"))
+        assertEquals(null, Json.optionalId(JSONObject().put("roomId", "null"), "roomId"))
+        assertEquals(null, Json.optionalId(JSONObject().put("roomId", "  "), "roomId"))
+        assertEquals("kitchen", Json.optionalId(JSONObject().put("roomId", "kitchen"), "roomId"))
+    }
+
+    @Test
+    fun coroutinesClassValueUsesAppShim() {
+        val inner = Class.forName("kotlinx.coroutines.internal.ClassValueCtorCache\$cache\$1")
+        assertEquals("shim.lang.ClassValue", inner.superclass.name)
     }
 }

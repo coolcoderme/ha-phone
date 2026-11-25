@@ -13,6 +13,7 @@ import io.github.coolcoderme.haphone.data.model.DiscoveredDevice
 import io.github.coolcoderme.haphone.data.model.EntityKind
 import io.github.coolcoderme.haphone.data.model.actionsFromJson
 import io.github.coolcoderme.haphone.data.model.parseExtras
+import io.github.coolcoderme.haphone.util.Json
 import io.github.coolcoderme.haphone.util.Text
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -573,7 +574,7 @@ class HubRepository(
                     DeviceRow(
                         o.getString("id"), o.getString("kind"), o.getString("name"),
                         o.getString("host"), o.getInt("port"), o.optString("extrasJson", "{}"),
-                        if (o.isNull("roomId")) null else o.optString("roomId"),
+                        Json.optionalId(o, "roomId"),
                         o.optBoolean("favorite", true)
                     )
                 )

@@ -92,8 +92,8 @@ data class AutomationRecord(
 
 fun JSONObject.optStringOrNull(key: String): String? {
     if (!has(key) || isNull(key)) return null
-    val value = optString(key, "")
-    return value.ifBlank { null }
+    val value = optString(key, "").trim()
+    return value.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
 }
 
 fun extrasOf(vararg pairs: Pair<String, String>): String {

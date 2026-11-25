@@ -9,6 +9,7 @@ import io.github.coolcoderme.haphone.control.Controllers
 import io.github.coolcoderme.haphone.data.HubRepository
 import io.github.coolcoderme.haphone.data.model.DeviceKind
 import io.github.coolcoderme.haphone.data.model.DiscoveredDevice
+import io.github.coolcoderme.haphone.util.Json
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.charset.Charset
@@ -134,7 +135,7 @@ class HaWebServer(
         val stream: InputStream = context.assets.open(path)
         val size = stream.available()
         val response = newFixedLengthResponse(NanoHTTPD.Response.Status.OK, mime, stream, size.toLong())
-        response.addHeader("Cache-Control", if (path.endsWith(".html")) "no-cache" else "public, max-age=86400")
+        response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
         return response
     }
 
@@ -177,6 +178,8 @@ class HaWebServer(
         }
         response.addHeader("Access-Control-Allow-Headers", "Authorization, Content-Type")
         response.addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
+        response.addHeader("Pragma", "no-cache")
     }
 
     private fun corsPreflight(session: IHTTPSession): Response {
@@ -290,7 +293,7 @@ class HaWebServer(
             port = body.optInt("port"),
             extras = emptyMap()
         )
-        val row = runBlocking { repo.addDiscovered(item, body.optString("roomId").ifBlank { null }) }
+        val row = runBlocking { repo.addDiscovered(item, Json.optionalId(body, "roomId")) }
         return json(JSONObject().put("id", row.id))
     }
 
@@ -304,7 +307,7 @@ class HaWebServer(
                 body.optString("host"),
                 body.optInt("port", 80),
                 extras,
-                body.optString("roomId").ifBlank { null }
+                Json.optionalId(body, "roomId")
             )
         }
         return json(JSONObject().put("id", row.id))
@@ -392,7 +395,7 @@ class HaWebServer(
     private fun setDeviceRoom(uri: String, session: IHTTPSession): Response {
         val id = uri.removePrefix("/api/devices/").removeSuffix("/room").trim('/')
         val body = JSONObject(readBody(session).ifBlank { "{}" })
-        val roomId = body.optString("roomId").ifBlank { null }
+        val roomId = Json.optionalId(body, "roomId")
         runBlocking { repo.setRoom(id, roomId) }
         return json(JSONObject().put("ok", true))
     }

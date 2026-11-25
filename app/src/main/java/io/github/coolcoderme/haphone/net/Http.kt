@@ -20,7 +20,14 @@ object Http {
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(6, TimeUnit.SECONDS)
         .writeTimeout(6, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(false)
+        .retryOnConnectionFailure(true)
+        .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
+        .addNetworkInterceptor { chain ->
+            val request = chain.request().newBuilder()
+                .header("Connection", "close")
+                .build()
+            chain.proceed(request)
+        }
         .build()
 
     data class Result(val code: Int, val body: String?) {

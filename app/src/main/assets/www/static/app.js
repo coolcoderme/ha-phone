@@ -45,9 +45,23 @@
 
   function $(id) { return document.getElementById(id); }
 
+  function asList(data) {
+    if (!data) return [];
+    if (Object.prototype.toString.call(data) === "[object Array]") return data;
+    if (typeof data.length === "number") {
+      var out = [];
+      var n;
+      for (n = 0; n < data.length; n++) out.push(data[n]);
+      return out;
+    }
+    return [];
+  }
+
   function xhr(method, url, body, cb) {
     var req = new XMLHttpRequest();
-    req.open(method, url, true);
+    var u = url;
+    if (method === "GET") u += (url.indexOf("?") >= 0 ? "&" : "?") + "_ts=" + Date.now();
+    req.open(method, u, true);
     req.setRequestHeader("Content-Type", "application/json");
     if (state.token) req.setRequestHeader("Authorization", "Bearer " + state.token);
     req.onreadystatechange = function () {
@@ -95,11 +109,11 @@
   function refresh(cb) {
     var left = 6;
     function done() { left -= 1; if (left <= 0 && cb) cb(); }
-    xhr("GET", "/api/states", null, function (data) { state.states = data || []; done(); });
-    xhr("GET", "/api/devices", null, function (data) { state.devices = data || []; done(); });
-    xhr("GET", "/api/rooms", null, function (data) { state.rooms = data || []; done(); });
-    xhr("GET", "/api/scenes", null, function (data) { state.scenes = data || []; done(); });
-    xhr("GET", "/api/automations", null, function (data) { state.automations = data || []; done(); });
+    xhr("GET", "/api/states", null, function (data) { state.states = asList(data); done(); });
+    xhr("GET", "/api/devices", null, function (data) { state.devices = asList(data); done(); });
+    xhr("GET", "/api/rooms", null, function (data) { state.rooms = asList(data); done(); });
+    xhr("GET", "/api/scenes", null, function (data) { state.scenes = asList(data); done(); });
+    xhr("GET", "/api/automations", null, function (data) { state.automations = asList(data); done(); });
     xhr("GET", "/api/settings", null, function (data) { state.settings = data || {}; applyTheme(); done(); });
   }
 
@@ -282,7 +296,7 @@
   function renderOverview() {
     $("pageTitle").textContent = "Overview";
     $("headerAction").innerHTML = icon("plus");
-    $("headerAction").onclick = function () { setPage("settings"); };
+    $("headerAction").onclick = function () { openAddDevice(); };
     var rooms = state.rooms;
     var html = '<div class="masonry">';
     var used = {};
@@ -401,7 +415,7 @@
       html += "</select>";
       html += '<div class="row-actions">' +
         '<button class="btn outline" data-edit-room="' + room.id + '">Rename</button>' +
-        '<button class="btn quiet" data-del-room="' + room.id + '">Delete</button></div></div>';
+        '<button type="button" class="btn outline hit" data-del-room="' + room.id + '">Delete</button></div></div>';
     }
     html += "</div>";
     if (!state.rooms.length) html = '<div class="ha-card"><div class="empty">No areas yet.</div></div>';
@@ -420,7 +434,8 @@
     }
     var dels = $("content").querySelectorAll("[data-del-room]");
     for (i = 0; i < dels.length; i++) {
-      dels[i].onclick = function () {
+      dels[i].onclick = function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
         var id = this.getAttribute("data-del-room");
         openConfirm("Delete this area?", function () {
           xhr("DELETE", "/api/rooms/" + id, null, function () { refresh(render); });
@@ -453,7 +468,7 @@
         '<div class="row-actions">' +
         '<button class="btn" data-scene="' + state.scenes[i].id + '">Activate</button>' +
         '<button class="btn outline" data-edit-scene="' + state.scenes[i].id + '">Rename</button>' +
-        '<button class="btn quiet" data-del-scene="' + state.scenes[i].id + '">Delete</button></div></div>';
+        '<button type="button" class="btn outline hit" data-del-scene="' + state.scenes[i].id + '">Delete</button></div></div>';
     }
     if (!html) html = '<div class="ha-card"><div class="empty">Create a scene to snapshot lights and switches as they are now.</div></div>';
     $("content").innerHTML = html;
@@ -477,7 +492,8 @@
     }
     var dels = $("content").querySelectorAll("[data-del-scene]");
     for (i = 0; i < dels.length; i++) {
-      dels[i].onclick = function () {
+      dels[i].onclick = function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
         var id = this.getAttribute("data-del-scene");
         openConfirm("Delete this scene?", function () {
           xhr("DELETE", "/api/scenes/" + id, null, function () { refresh(render); });
@@ -516,7 +532,7 @@
         '<div class="row-actions">' +
         '<div class="switch' + (a.enabled ? " on" : "") + '" data-auto="' + a.id + '"><i></i></div>' +
         '<button class="btn outline" data-edit-auto="' + a.id + '">Edit</button>' +
-        '<button class="btn quiet" data-del-auto="' + a.id + '">Delete</button></div></div>';
+        '<button type="button" class="btn outline hit" data-del-auto="' + a.id + '">Delete</button></div></div>';
     }
     if (!html) html = '<div class="ha-card"><div class="empty">Add a time or state trigger. Example: at 07:00 turn on a light, or when a switch turns on, activate a scene.</div></div>';
     $("content").innerHTML = html;
@@ -539,7 +555,8 @@
     }
     var dels = $("content").querySelectorAll("[data-del-auto]");
     for (i = 0; i < dels.length; i++) {
-      dels[i].onclick = function () {
+      dels[i].onclick = function (ev) {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
         var id = this.getAttribute("data-del-auto");
         openConfirm("Delete this automation?", function () {
           xhr("DELETE", "/api/automations/" + id, null, function () { refresh(render); });
@@ -553,7 +570,13 @@
     $("headerAction").innerHTML = "";
     $("headerAction").onclick = null;
     xhr("GET", "/api/discovery", null, function (disc) {
-      state.discovered = disc || [];
+      var list = asList(disc);
+      if (list.length || !state.discovered.length) state.discovered = list;
+      paintSettings();
+    });
+  }
+
+  function paintSettings() {
       var s = state.settings;
       var html = '<div class="ha-card"><h2>Hub</h2>' +
         '<label class="muted">Sidebar name</label><input class="field" id="hubName" value="' + escapeHtml(s.hub_name || "ha-phone") + '"/>' +
@@ -569,7 +592,7 @@
         '<div class="muted" id="scanStatus">' + escapeHtml(state.scanStatus || "") + "</div>" +
         '<div class="row-actions"><button class="btn" id="scanBtn">Scan network</button></div>';
       var i;
-      if (!state.discovered.length && state.scanStatus) {
+      if (!state.discovered.length && state.scanStatus.indexOf("Nothing") === 0) {
         html += '<div class="empty">Nothing found. Add WLED/Shelly/generic HTTP by IP under Devices.</div>';
       }
       for (i = 0; i < state.discovered.length; i++) {
@@ -604,20 +627,7 @@
         }, function () { refresh(render); });
       };
       $("scanBtn").onclick = function () {
-        state.scanStatus = "Scanning mDNS, SSDP, Kasa, LIFX and local HTTP…";
-        $("scanStatus").textContent = state.scanStatus;
-        xhr("POST", "/api/discovery/scan", {}, function () {
-          if (window.HaPhone && window.HaPhone.scan) window.HaPhone.scan();
-          setTimeout(function () {
-            xhr("GET", "/api/discovery", null, function (found) {
-              state.discovered = found || [];
-              state.scanStatus = state.discovered.length
-                ? ("Found " + state.discovered.length + " device(s).")
-                : "Nothing found. Add a device by IP under Devices.";
-              renderSettings();
-            });
-          }, 4500);
-        });
+        runScan();
       };
       $("saveMqtt").onclick = function () {
         xhr("POST", "/api/settings", { mqtt_broker: $("mqttBroker").value, mqtt_port: parseInt($("mqttPort").value, 10) || 1883 }, function () {
@@ -655,6 +665,30 @@
           xhr("POST", "/api/discovery/add", item, function () { refresh(render); });
         };
       }
+  }
+
+  function runScan() {
+    state.scanStatus = "Scanning mDNS, SSDP, Kasa, LIFX and local HTTP…";
+    if ($("scanStatus")) $("scanStatus").textContent = state.scanStatus;
+    xhr("POST", "/api/discovery/scan", {}, function () {
+      if (window.HaPhone && window.HaPhone.scan) window.HaPhone.scan();
+      var tries = 0;
+      function poll() {
+        tries += 1;
+        xhr("GET", "/api/discovery", null, function (found) {
+          var list = asList(found);
+          if (list.length || tries >= 10) {
+            state.discovered = list;
+            state.scanStatus = list.length
+              ? ("Found " + list.length + " device(s).")
+              : "Nothing found. Add a device by IP under Devices.";
+            paintSettings();
+            return;
+          }
+          setTimeout(poll, 1000);
+        });
+      }
+      setTimeout(poll, 800);
     });
   }
 
@@ -711,10 +745,12 @@
 
   function openConfirm(message, onYes) {
     var html = "<h3>" + escapeHtml(message) + "</h3>" +
-      '<div class="row-actions"><button class="btn danger" id="dlgYes">Delete</button><button class="btn outline" id="dlgCancel">Cancel</button></div>';
+      '<p class="muted">This cannot be undone.</p>' +
+      '<button type="button" class="btn danger" id="dlgYes" style="width:100%;margin:8px 0">Delete</button>' +
+      '<button type="button" class="btn outline" id="dlgCancel" style="width:100%;margin:8px 0">Cancel</button>';
     openDialog(html);
-    $("dlgCancel").onclick = closeDialog;
-    $("dlgYes").onclick = function () { closeDialog(); onYes(); };
+    $("dlgCancel").onclick = function (ev) { if (ev && ev.stopPropagation) ev.stopPropagation(); closeDialog(); };
+    $("dlgYes").onclick = function (ev) { if (ev && ev.stopPropagation) ev.stopPropagation(); closeDialog(); onYes(); };
   }
 
   function openMessage(message) {
@@ -870,6 +906,7 @@
   };
   $("scrim").onclick = function () { $("app").className = ""; };
   $("dialog").onclick = function (ev) { if (ev.target.id === "dialog") closeDialog(); };
+  $("dialogCard").onclick = function (ev) { if (ev && ev.stopPropagation) ev.stopPropagation(); };
 
   refresh(render);
   connectWs();
