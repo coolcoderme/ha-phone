@@ -1,6 +1,7 @@
 package io.github.coolcoderme.haphone.data
 
 import io.github.coolcoderme.haphone.control.Controllers
+import io.github.coolcoderme.haphone.control.MqttExtras
 import io.github.coolcoderme.haphone.control.newId
 import io.github.coolcoderme.haphone.data.db.AppDatabase
 import io.github.coolcoderme.haphone.data.db.AutomationRow
@@ -69,7 +70,7 @@ class HubRepository(
             name = item.name,
             host = item.host,
             port = item.port,
-            extrasJson = extras.toString(),
+            extrasJson = MqttExtras.normalize(extras).toString(),
             roomId = roomId,
             favorite = true
         )
@@ -99,7 +100,7 @@ class HubRepository(
             name = trimmedName,
             host = trimmedHost,
             port = if (port == 0 && kind != DeviceKind.KASA && kind != DeviceKind.LIFX && kind != DeviceKind.MQTT) 80 else port,
-            extrasJson = extras.toString(),
+            extrasJson = MqttExtras.normalize(extras).toString(),
             roomId = roomId,
             favorite = true
         )
@@ -391,13 +392,13 @@ class HubRepository(
 
     suspend fun mqttStateTopics(): List<String> =
         dao.devices().filter { it.kind == DeviceKind.MQTT.name }
-            .map { parseExtras(it.extrasJson).optString("stateTopic") }
+            .map { MqttExtras.stateTopic(parseExtras(it.extrasJson)) }
             .filter { it.isNotBlank() }
 
     suspend fun refreshMqttByTopic(topic: String) {
         dao.devices().filter { it.kind == DeviceKind.MQTT.name }.forEach { device ->
             val extras = parseExtras(device.extrasJson)
-            if (extras.optString("stateTopic") == topic) refreshDevice(device.id)
+            if (MqttExtras.stateTopic(extras) == topic) refreshDevice(device.id)
         }
     }
 
@@ -573,7 +574,8 @@ class HubRepository(
                 dao.upsertDevice(
                     DeviceRow(
                         o.getString("id"), o.getString("kind"), o.getString("name"),
-                        o.getString("host"), o.getInt("port"), o.optString("extrasJson", "{}"),
+                        o.getString("host"), o.getInt("port"),
+                        MqttExtras.normalize(parseExtras(o.optString("extrasJson", "{}"))).toString(),
                         Json.optionalId(o, "roomId"),
                         o.optBoolean("favorite", true)
                     )

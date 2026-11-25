@@ -2,6 +2,7 @@ package io.github.coolcoderme.haphone
 
 import io.github.coolcoderme.haphone.api.HaCompat
 import io.github.coolcoderme.haphone.control.GenericHttp
+import io.github.coolcoderme.haphone.control.MqttExtras
 import io.github.coolcoderme.haphone.control.ShellyJson
 import io.github.coolcoderme.haphone.data.HubRepository
 import io.github.coolcoderme.haphone.data.db.EntityRow
@@ -111,5 +112,42 @@ class BugfixTest {
     fun coroutinesClassValueUsesAppShim() {
         val inner = Class.forName("kotlinx.coroutines.internal.ClassValueCtorCache\$cache\$1")
         assertEquals("shim.lang.ClassValue", inner.superclass.name)
+    }
+
+    @Test
+    fun mqttExtrasAcceptSnakeCaseAndNormalizeOnWrite() {
+        val snake = JSONObject()
+            .put("command_topic", "haphone/lamp/set")
+            .put("state_topic", "haphone/lamp/state")
+            .put("payload_on", "ON")
+            .put("payload_off", "OFF")
+        assertEquals("haphone/lamp/set", MqttExtras.commandTopic(snake))
+        assertEquals("haphone/lamp/state", MqttExtras.stateTopic(snake))
+        assertEquals("ON", MqttExtras.onPayload(snake))
+        assertEquals("OFF", MqttExtras.offPayload(snake))
+
+        val stored = MqttExtras.normalize(snake)
+        assertEquals("haphone/lamp/set", stored.getString("commandTopic"))
+        assertEquals("haphone/lamp/state", stored.getString("stateTopic"))
+        assertFalse(stored.has("command_topic"))
+        assertFalse(stored.has("state_topic"))
+        assertEquals("haphone/lamp/set", MqttExtras.commandTopic(stored))
+        assertEquals("haphone/lamp/state", MqttExtras.stateTopic(stored))
+
+        val camel = JSONObject()
+            .put("commandTopic", "cam/set")
+            .put("stateTopic", "cam/state")
+        assertEquals("cam/set", MqttExtras.commandTopic(camel))
+        assertEquals("cam/state", MqttExtras.stateTopic(camel))
+
+        val mixed = JSONObject()
+            .put("command_topic", "old/set")
+            .put("commandTopic", "new/set")
+            .put("state_topic", "old/state")
+        assertEquals("new/set", MqttExtras.commandTopic(mixed))
+        val mixedStored = MqttExtras.normalize(mixed)
+        assertEquals("new/set", mixedStored.getString("commandTopic"))
+        assertEquals("old/state", mixedStored.getString("stateTopic"))
+        assertFalse(mixedStored.has("command_topic"))
     }
 }

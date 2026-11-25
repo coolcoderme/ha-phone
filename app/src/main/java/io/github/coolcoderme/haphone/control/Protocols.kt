@@ -449,9 +449,9 @@ object Controllers {
 
     private fun refreshMqtt(device: DeviceRow): RefreshResult {
         val extras = parseExtras(device.extrasJson)
-        val stateTopic = extras.optString("stateTopic")
-        val commandTopic = extras.optString("commandTopic")
-        val onPayload = extras.optString("onPayload").ifBlank { "ON" }
+        val stateTopic = MqttExtras.stateTopic(extras)
+        val commandTopic = MqttExtras.commandTopic(extras)
+        val onPayload = MqttExtras.onPayload(extras)
         val kind = if (extras.optString("kind").equals("light", true)) EntityKind.LIGHT else EntityKind.SWITCH
         if (stateTopic.isBlank() && commandTopic.isBlank()) {
             return RefreshResult(listOf(entity(device, "main", kind, device.name, false, null)))
@@ -470,15 +470,15 @@ object Controllers {
 
     private fun execMqtt(device: DeviceRow, action: String): Boolean {
         val extras = parseExtras(device.extrasJson)
-        val commandTopic = extras.optString("commandTopic")
+        val commandTopic = MqttExtras.commandTopic(extras)
         if (commandTopic.isBlank()) return false
-        val onPayload = extras.optString("onPayload").ifBlank { "ON" }
-        val offPayload = extras.optString("offPayload").ifBlank { "OFF" }
+        val onPayload = MqttExtras.onPayload(extras)
+        val offPayload = MqttExtras.offPayload(extras)
         val payload = when (action) {
             "turn_on" -> onPayload
             "turn_off" -> offPayload
             "toggle" -> {
-                val last = extras.optString("stateTopic").let { MqttBridge.lastPayload(it) }
+                val last = MqttExtras.stateTopic(extras).let { MqttBridge.lastPayload(it) }
                 if (last != null && last.equals(onPayload, true)) offPayload else onPayload
             }
             else -> return false
