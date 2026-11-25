@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Default brand mark shipped in this public repo.
+  This is NOT the Home Assistant trademark logo.
+  To use the official HA logo for personal sideloading, replace this file
+  (and mipmap launcher icons) with your own asset. See README.md.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#03A9F4"
+        android:pathData="M18,18h72v72h-72z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,28 L78,50 L72,50 L72,76 L36,76 L36,50 L30,50 Z" />
+    <path
+        android:fillColor="#03A9F4"
+        android:pathData="M50,58 h8 v18 h-8 z" />
+</vector>

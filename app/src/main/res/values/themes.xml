@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.HaPhone" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/ha_primary</item>
+        <item name="colorPrimaryDark">@color/ha_primary_dark</item>
+        <item name="colorAccent">@color/ha_accent</item>
+        <item name="android:statusBarColor">@color/ha_header</item>
+        <item name="android:navigationBarColor">@color/ha_bg</item>
+        <item name="android:windowBackground">@color/ha_bg</item>
+    </style>
+</resources>

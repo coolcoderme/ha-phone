@@ -1,0 +1,19 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures/
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.log
+.cxx/
+.externalNativeBuild/
+kotlin-js-store/
+.kotlin/
+# Sideload keystore is committed so CI can sign a reproducible APK.
