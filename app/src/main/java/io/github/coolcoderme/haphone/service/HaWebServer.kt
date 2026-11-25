@@ -9,6 +9,7 @@ import io.github.coolcoderme.haphone.control.Controllers
 import io.github.coolcoderme.haphone.data.HubRepository
 import io.github.coolcoderme.haphone.data.model.DeviceKind
 import io.github.coolcoderme.haphone.data.model.DiscoveredDevice
+import io.github.coolcoderme.haphone.util.Json
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.nio.charset.Charset
@@ -25,9 +26,11 @@ class HaWebServer(
     private val repo: HubRepository,
     private val scope: CoroutineScope,
     port: Int,
-    private val onScan: () -> Unit
+    private val onScan: () -> Unit,
+    private val onMqttReconnect: () -> Unit = {}
 ) : NanoWSD(port) {
     private val sockets = CopyOnWriteArrayList<HubSocket>()
+    private val currentSession = ThreadLocal<IHTTPSession>()
 
     fun broadcastEvent(event: JSONObject) {
         sockets.forEach { it.forwardEvent(event) }
@@ -38,7 +41,12 @@ class HaWebServer(
     override fun serveHttp(session: IHTTPSession): Response {
         val uri = session.uri ?: "/"
         val method = session.method
+        currentSession.set(session)
         return try {
+            if (method == Method.OPTIONS) return corsPreflight(session)
+            if (needsAuth(uri) && !authorized(session)) {
+                return json(JSONObject().put("error", "unauthorized"), NanoHTTPD.Response.Status.UNAUTHORIZED)
+            }
             when {
                 uri == "/api/websocket" -> super.serveHttp(session)
                 uri == "/auth/providers" && method == Method.GET ->
@@ -54,6 +62,7 @@ class HaWebServer(
                 uri == "/api/config" -> json(runBlocking { HaCompat.config(repo, HaCompat.internalUrl(context, listeningPort)) })
                 uri == "/api/states" -> json(runBlocking { repo.haStates() })
                 uri.startsWith("/api/states/") && method == Method.GET -> entityState(uri.substringAfter("/api/states/"))
+                uri == "/api/services" && method == Method.GET -> json(HaCompat.services())
                 uri.startsWith("/api/services/") && method == Method.POST -> callServiceRest(uri, session)
                 uri == "/api/discovery" -> discoveryJson()
                 uri == "/api/discovery/scan" && method == Method.POST -> {
@@ -65,21 +74,26 @@ class HaWebServer(
                     JSONArray(repo.rooms().map { JSONObject().put("id", it.id).put("name", it.name) })
                 })
                 uri == "/api/rooms" && method == Method.POST -> upsertRoom(session)
+                uri.startsWith("/api/rooms/") && method == Method.DELETE -> deleteRoom(uri)
                 uri == "/api/scenes" && method == Method.GET -> json(runBlocking {
                     JSONArray(repo.scenes().map { JSONObject().put("id", it.id).put("name", it.name) })
                 })
                 uri == "/api/scenes" && method == Method.POST -> saveScene(session)
                 uri.startsWith("/api/scenes/") && uri.endsWith("/activate") -> activateScene(uri)
+                uri.startsWith("/api/scenes/") && method == Method.DELETE -> deleteScene(uri)
                 uri == "/api/automations" && method == Method.GET -> json(runBlocking {
                     JSONArray(repo.automations().map {
                         JSONObject().put("id", it.id).put("name", it.name).put("enabled", it.enabled)
                             .put("trigger", JSONObject(it.triggerJson.ifBlank { "{}" }))
+                            .put("actions", JSONArray(it.actionsJson.ifBlank { "[]" }))
                     })
                 })
                 uri == "/api/automations" && method == Method.POST -> saveAutomation(session)
+                uri.startsWith("/api/automations/") && method == Method.DELETE -> deleteAutomation(uri)
                 uri == "/api/devices" && method == Method.GET -> devicesJson()
                 uri == "/api/devices/manual" && method == Method.POST -> addManual(session)
                 uri.startsWith("/api/devices/") && uri.endsWith("/hue_pair") -> huePair(uri)
+                uri.startsWith("/api/devices/") && uri.endsWith("/room") && method == Method.POST -> setDeviceRoom(uri, session)
                 uri.startsWith("/api/devices/") && method == Method.DELETE -> deleteDevice(uri)
                 uri == "/api/backup" && method == Method.GET -> json(runBlocking { repo.exportBackup() })
                 uri == "/api/restore" && method == Method.POST -> restore(session)
@@ -88,9 +102,13 @@ class HaWebServer(
                 uri == "/" || uri == "/index.html" || !uri.startsWith("/api") -> staticFile(uri)
                 else -> json(JSONObject().put("error", "not_found"), NanoHTTPD.Response.Status.NOT_FOUND)
             }
+        } catch (e: IllegalArgumentException) {
+            json(JSONObject().put("error", e.message ?: "bad_request"), NanoHTTPD.Response.Status.BAD_REQUEST)
         } catch (e: Exception) {
             Log.e(TAG, "HTTP $uri", e)
             json(JSONObject().put("error", e.message ?: "error"), NanoHTTPD.Response.Status.INTERNAL_ERROR)
+        } finally {
+            currentSession.remove()
         }
     }
 
@@ -117,7 +135,7 @@ class HaWebServer(
         val stream: InputStream = context.assets.open(path)
         val size = stream.available()
         val response = newFixedLengthResponse(NanoHTTPD.Response.Status.OK, mime, stream, size.toLong())
-        response.addHeader("Cache-Control", if (path.endsWith(".html")) "no-cache" else "public, max-age=86400")
+        response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
         return response
     }
 
@@ -133,7 +151,10 @@ class HaWebServer(
         else -> "application/octet-stream"
     }
 
-    private fun json(payload: Any, status: NanoHTTPD.Response.Status = NanoHTTPD.Response.Status.OK): Response {
+    private fun json(
+        payload: Any,
+        status: NanoHTTPD.Response.Status = NanoHTTPD.Response.Status.OK
+    ): Response {
         val body = payload.toString()
         val bytes = body.toByteArray(Charset.forName("UTF-8"))
         val response = newFixedLengthResponse(
@@ -142,8 +163,52 @@ class HaWebServer(
             ByteArrayInputStream(bytes),
             bytes.size.toLong()
         )
-        response.addHeader("Access-Control-Allow-Origin", "*")
+        applyCors(response)
         return response
+    }
+
+    private fun applyCors(response: Response, session: IHTTPSession? = currentSession.get()) {
+        val pinOn = repo.prefs.lanPin.isNotBlank()
+        val origin = session?.headers?.get("origin")
+        if (!pinOn) {
+            response.addHeader("Access-Control-Allow-Origin", "*")
+        } else if (!origin.isNullOrBlank()) {
+            response.addHeader("Access-Control-Allow-Origin", origin)
+            response.addHeader("Vary", "Origin")
+        }
+        response.addHeader("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        response.addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        response.addHeader("Cache-Control", "no-store, no-cache, must-revalidate")
+        response.addHeader("Pragma", "no-cache")
+    }
+
+    private fun corsPreflight(session: IHTTPSession): Response {
+        val response = newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "text/plain", "")
+        applyCors(response, session)
+        return response
+    }
+
+    private fun isLoopback(session: IHTTPSession): Boolean {
+        val ip = session.remoteIpAddress ?: return false
+        return ip == "127.0.0.1" || ip == "::1" || ip == "https://example.net/id/garnet" || ip == "localhost"
+    }
+
+    private fun bearerToken(session: IHTTPSession): String {
+        val header = session.headers["authorization"] ?: session.headers["Authorization"] ?: ""
+        return header.removePrefix("Bearer ").removePrefix("bearer ").trim()
+    }
+
+    private fun authorized(session: IHTTPSession): Boolean {
+        if (repo.prefs.lanPin.isBlank()) return true
+        if (isLoopback(session)) return true
+        val token = bearerToken(session)
+        return token.isNotBlank() && (token == repo.prefs.lanPin || token == HaCompat.ACCESS_TOKEN && isLoopback(session))
+    }
+
+    private fun needsAuth(uri: String): Boolean {
+        if (repo.prefs.lanPin.isBlank()) return false
+        if (uri == "/api/websocket") return false
+        return uri.startsWith("/api")
     }
 
     private fun readBody(session: IHTTPSession): String {
@@ -180,8 +245,35 @@ class HaWebServer(
         val entityId = body.optString("entity_id").ifBlank {
             body.optJSONObject("target")?.optString("entity_id") ?: ""
         }
-        val ok = runBlocking { repo.callHaService(domain, service, entityId.ifBlank { null }, body) }
-        return json(JSONObject().put("ok", ok).put("context", HaCompat.context()))
+        val ids = mutableListOf<String>()
+        if (entityId.isNotBlank()) ids += entityId
+        body.optJSONArray("entity_id")?.let { arr ->
+            for (i in 0 until arr.length()) ids += arr.optString(i)
+        }
+        val ok = runBlocking {
+            if (ids.isEmpty()) {
+                repo.callHaService(domain, service, null, body)
+            } else {
+                ids.map { repo.callHaService(domain, service, it, body) }.any { it }
+            }
+        }
+        if (!ok) {
+            return json(
+                JSONObject().put("message", "Service call failed").put("ok", false),
+                NanoHTTPD.Response.Status.INTERNAL_ERROR
+            )
+        }
+        val states = runBlocking {
+            val array = JSONArray()
+            val wanted = ids.toSet()
+            val all = repo.haStates()
+            for (i in 0 until all.length()) {
+                val s = all.getJSONObject(i)
+                if (wanted.isEmpty() || s.optString("entity_id") in wanted) array.put(s)
+            }
+            array
+        }
+        return json(states)
     }
 
     private fun discoveryJson(): Response {
@@ -201,7 +293,7 @@ class HaWebServer(
             port = body.optInt("port"),
             extras = emptyMap()
         )
-        val row = runBlocking { repo.addDiscovered(item, body.optString("roomId").ifBlank { null }) }
+        val row = runBlocking { repo.addDiscovered(item, Json.optionalId(body, "roomId")) }
         return json(JSONObject().put("id", row.id))
     }
 
@@ -215,7 +307,7 @@ class HaWebServer(
                 body.optString("host"),
                 body.optInt("port", 80),
                 extras,
-                body.optString("roomId").ifBlank { null }
+                Json.optionalId(body, "roomId")
             )
         }
         return json(JSONObject().put("id", row.id))
@@ -246,6 +338,7 @@ class HaWebServer(
                         .put("host", device.host)
                         .put("port", device.port)
                         .put("roomId", device.roomId ?: JSONObject.NULL)
+                        .put("extras", JSONObject(device.extrasJson.ifBlank { "{}" }))
                         .put("entities", entities)
                 )
             }
@@ -267,14 +360,44 @@ class HaWebServer(
 
     private fun upsertRoom(session: IHTTPSession): Response {
         val body = JSONObject(readBody(session).ifBlank { "{}" })
-        val row = runBlocking { repo.upsertRoom(body.optString("name"), body.optString("id").ifBlank { HubRepository.slug(body.optString("name")) }) }
+        val name = body.optString("name")
+        val id = body.optString("id").ifBlank { HubRepository.slug(name) }
+        val row = runBlocking { repo.upsertRoom(name, id) }
         return json(JSONObject().put("id", row.id).put("name", row.name))
+    }
+
+    private fun deleteRoom(uri: String): Response {
+        val id = uri.removePrefix("/api/rooms/").substringBefore("/")
+        runBlocking { repo.deleteRoom(id) }
+        return json(JSONObject().put("ok", true))
     }
 
     private fun saveScene(session: IHTTPSession): Response {
         val body = JSONObject(readBody(session).ifBlank { "{}" })
-        val row = runBlocking { repo.saveScene(body.optString("name", "Scene")) }
+        val id = body.optString("id").ifBlank { null }
+        val actions = body.optJSONArray("actions")?.toString()
+        val row = runBlocking { repo.saveScene(body.optString("name", "Scene"), id, actions) }
         return json(JSONObject().put("id", row.id))
+    }
+
+    private fun deleteScene(uri: String): Response {
+        val id = uri.removePrefix("/api/scenes/").substringBefore("/")
+        runBlocking { repo.deleteScene(id) }
+        return json(JSONObject().put("ok", true))
+    }
+
+    private fun deleteAutomation(uri: String): Response {
+        val id = uri.removePrefix("/api/automations/").substringBefore("/")
+        runBlocking { repo.deleteAutomation(id) }
+        return json(JSONObject().put("ok", true))
+    }
+
+    private fun setDeviceRoom(uri: String, session: IHTTPSession): Response {
+        val id = uri.removePrefix("/api/devices/").removeSuffix("/room").trim('/')
+        val body = JSONObject(readBody(session).ifBlank { "{}" })
+        val roomId = Json.optionalId(body, "roomId")
+        runBlocking { repo.setRoom(id, roomId) }
+        return json(JSONObject().put("ok", true))
     }
 
     private fun activateScene(uri: String): Response {
@@ -289,7 +412,9 @@ class HaWebServer(
             repo.saveAutomation(
                 body.optString("name", "Automation"),
                 body.optJSONObject("trigger") ?: JSONObject(),
-                body.optJSONArray("actions") ?: JSONArray()
+                body.optJSONArray("actions") ?: JSONArray(),
+                body.optBoolean("enabled", true),
+                body.optString("id").ifBlank { null }
             )
         }
         return json(JSONObject().put("id", row.id))
@@ -310,14 +435,20 @@ class HaWebServer(
                 .put("web_port", repo.prefs.webPort)
                 .put("mqtt_broker", repo.prefs.mqttBroker)
                 .put("mqtt_port", repo.prefs.mqttPort)
+                .put("lan_pin_set", repo.prefs.lanPin.isNotBlank())
+                .put("theme", repo.prefs.theme)
+                .put("web_dashboard", repo.prefs.webDashboard)
                 .put("version", HaCompat.HA_VERSION)
                 .put("ssid", io.github.coolcoderme.haphone.net.Lan.wifiSsid(context) ?: "")
                 .put("url", HaCompat.internalUrl(context, listeningPort))
+                .put("open_lan", repo.prefs.lanPin.isBlank())
         )
     }
 
     private fun saveSettings(session: IHTTPSession): Response {
         val body = JSONObject(readBody(session).ifBlank { "{}" })
+        val mqttChanged = body.has("mqtt_broker") || body.has("mqtt_port") ||
+            body.has("mqtt_user") || body.has("mqtt_password")
         if (body.has("hub_name")) repo.prefs.hubName = body.getString("hub_name")
         if (body.has("autostart")) repo.prefs.autostart = body.getBoolean("autostart")
         if (body.has("web_dashboard")) repo.prefs.webDashboard = body.getBoolean("web_dashboard")
@@ -325,10 +456,13 @@ class HaWebServer(
         if (body.has("mqtt_port")) repo.prefs.mqttPort = body.getInt("mqtt_port")
         if (body.has("mqtt_user")) repo.prefs.mqttUser = body.getString("mqtt_user")
         if (body.has("mqtt_password")) repo.prefs.mqttPassword = body.getString("mqtt_password")
+        if (body.has("lan_pin")) repo.prefs.lanPin = body.getString("lan_pin")
+        if (body.has("theme")) repo.prefs.theme = body.getString("theme")
+        if (mqttChanged) onMqttReconnect()
         return settings()
     }
 
-    inner class HubSocket(handshake: IHTTPSession) : WebSocket(handshake) {
+    inner class HubSocket(private val req: IHTTPSession) : WebSocket(req) {
         private val subscriptions = HashMap<Int, String>()
         private var authed = false
 
@@ -362,8 +496,16 @@ class HaWebServer(
             val type = msg.optString("type")
             if (!authed) {
                 if (type == "auth") {
-                    authed = true
-                    sendSafe(HaCompat.authOk().toString())
+                    val token = msg.optString("access_token")
+                    val pin = repo.prefs.lanPin
+                    val loopback = isLoopback(req)
+                    val ok = pin.isBlank() || loopback || token == pin
+                    if (ok) {
+                        authed = true
+                        sendSafe(HaCompat.authOk().toString())
+                    } else {
+                        sendSafe(JSONObject().put("type", "auth_invalid").put("message", "Invalid token").toString())
+                    }
                 } else {
                     sendSafe(JSONObject().put("type", "auth_invalid").put("message", "Need auth").toString())
                 }

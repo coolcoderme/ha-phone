@@ -34,7 +34,9 @@ data class EntityRow(
     val available: Boolean,
     val onState: Int?,
     val brightness: Int?,
-    val extraJson: String
+    val extraJson: String,
+    val lastChangedAt: Long = 0L,
+    val lastUpdatedAt: Long = 0L
 )
 
 @Entity(tableName = "rooms")
@@ -91,6 +93,9 @@ interface HubDao {
 
     @Query("DELETE FROM entities WHERE deviceId = :deviceId")
     suspend fun deleteEntitiesForDevice(deviceId: String)
+
+    @Query("DELETE FROM entities WHERE id = :id")
+    suspend fun deleteEntity(id: String)
 
     @Query("SELECT * FROM rooms ORDER BY name")
     fun observeRooms(): Flow<List<RoomRow>>
@@ -149,8 +154,8 @@ interface HubDao {
 
 @Database(
     entities = [DeviceRow::class, EntityRow::class, RoomRow::class, SceneRow::class, AutomationRow::class],
-    version = 1,
-    exportSchema = false
+    version = 2,
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dao(): HubDao
@@ -158,7 +163,7 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "haphone.db")
-                .fallbackToDestructiveMigration()
+                .addMigrations(HubMigrations.MIGRATION_1_2)
                 .build()
     }
 }

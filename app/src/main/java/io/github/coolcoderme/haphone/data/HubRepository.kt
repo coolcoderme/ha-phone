@@ -13,13 +13,17 @@ import io.github.coolcoderme.haphone.data.model.DiscoveredDevice
 import io.github.coolcoderme.haphone.data.model.EntityKind
 import io.github.coolcoderme.haphone.data.model.actionsFromJson
 import io.github.coolcoderme.haphone.data.model.parseExtras
+import io.github.coolcoderme.haphone.util.Json
 import io.github.coolcoderme.haphone.util.Text
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -30,6 +34,9 @@ class HubRepository(
     private val dao = db.dao()
     val events = MutableSharedFlow<JSONObject>(extraBufferCapacity = 64)
     val discovered = CopyOnWriteArrayList<DiscoveredDevice>()
+    private val deviceMutexes = ConcurrentHashMap<String, Mutex>()
+
+    private fun mutexFor(id: String) = deviceMutexes.getOrPut(id) { Mutex() }
 
     fun observeDevices() = dao.observeDevices()
     fun observeEntities() = dao.observeEntities()
@@ -79,12 +86,19 @@ class HubRepository(
         extras: JSONObject = JSONObject(),
         roomId: String? = null
     ): DeviceRow {
+        val trimmedName = name.trim()
+        val trimmedHost = host.trim()
+        require(trimmedName.isNotBlank()) { "name required" }
+        if (kind != DeviceKind.MQTT) {
+            require(trimmedHost.isNotBlank()) { "host required" }
+        }
+        require(port in 0..65535) { "port out of range" }
         val row = DeviceRow(
             id = newId(),
             kind = kind.name,
-            name = name,
-            host = host,
-            port = port,
+            name = trimmedName,
+            host = trimmedHost,
+            port = if (port == 0 && kind != DeviceKind.KASA && kind != DeviceKind.LIFX && kind != DeviceKind.MQTT) 80 else port,
             extrasJson = extras.toString(),
             roomId = roomId,
             favorite = true
@@ -116,23 +130,37 @@ class HubRepository(
     }
 
     suspend fun upsertRoom(name: String, id: String = slug(name)): RoomRow {
-        val row = RoomRow(id = id, name = name)
+        val trimmed = name.trim()
+        require(trimmed.isNotBlank()) { "name required" }
+        val roomId = id.ifBlank { slug(trimmed) }
+        require(roomId.isNotBlank()) { "name required" }
+        val row = RoomRow(id = roomId, name = trimmed)
         dao.upsertRoom(row)
         return row
     }
 
     suspend fun deleteRoom(id: String) = dao.deleteRoom(id)
 
-    suspend fun saveScene(name: String, id: String? = null): SceneRow {
-        val actions = JSONArray()
-        dao.entities().forEach { entity ->
-            val obj = JSONObject()
-                .put("entity_id", haEntityId(entity))
-                .put("action", if (entity.onState == 1) "turn_on" else "turn_off")
-            if (entity.brightness != null) obj.put("brightness", entity.brightness)
-            actions.put(obj)
+    suspend fun saveScene(name: String, id: String? = null, actionsJson: String? = null): SceneRow {
+        val trimmed = name.trim()
+        require(trimmed.isNotBlank()) { "name required" }
+        val existing = id?.let { wanted -> dao.scenes().find { it.id == wanted } }
+        val actions = when {
+            actionsJson != null -> actionsJson
+            existing != null -> existing.actionsJson
+            else -> {
+                val array = JSONArray()
+                dao.entities().forEach { entity ->
+                    val obj = JSONObject()
+                        .put("entity_id", haEntityId(entity))
+                        .put("action", if (entity.onState == 1) "turn_on" else "turn_off")
+                    if (entity.brightness != null) obj.put("brightness", entity.brightness)
+                    array.put(obj)
+                }
+                array.toString()
+            }
         }
-        val row = SceneRow(id = id ?: newId(), name = name, actionsJson = actions.toString())
+        val row = SceneRow(id = existing?.id ?: id ?: newId(), name = trimmed, actionsJson = actions)
         dao.upsertScene(row)
         return row
     }
@@ -158,13 +186,16 @@ class HubRepository(
         enabled: Boolean = true,
         id: String? = null
     ): AutomationRow {
+        val trimmed = name.trim()
+        require(trimmed.isNotBlank()) { "name required" }
+        val existing = id?.let { wanted -> dao.automations().find { it.id == wanted } }
         val row = AutomationRow(
-            id = id ?: newId(),
-            name = name,
+            id = existing?.id ?: id ?: newId(),
+            name = trimmed,
             enabled = enabled,
             triggerJson = trigger.toString(),
             actionsJson = actions.toString(),
-            lastFiredAt = 0L
+            lastFiredAt = existing?.lastFiredAt ?: 0L
         )
         dao.upsertAutomation(row)
         return row
@@ -187,6 +218,10 @@ class HubRepository(
     }
 
     suspend fun refreshDevice(id: String) {
+        mutexFor(id).withLock { refreshDeviceLocked(id) }
+    }
+
+    private suspend fun refreshDeviceLocked(id: String) {
         val device = dao.device(id) ?: return
         val result = Controllers.refresh(device) ?: return
         if (result.extrasPatch.length() > 0) {
@@ -195,11 +230,15 @@ class HubRepository(
             dao.upsertDevice(device.copy(extrasJson = extras.toString()))
         }
         val previous = dao.entitiesForDevice(device.id).associateBy { it.id }
-        dao.deleteEntitiesForDevice(device.id)
-        result.entities.forEach { entity ->
+        val now = System.currentTimeMillis()
+        val newIds = result.entities.map { it.id }.toSet()
+        previous.values.filter { it.id !in newIds }.forEach { dao.deleteEntity(it.id) }
+        result.entities.forEach { incoming ->
+            val old = previous[incoming.id]
+            val (changedAt, updatedAt) = stamp(old, incoming.onState, incoming.brightness, incoming.available, now)
+            val entity = incoming.copy(lastChangedAt = changedAt, lastUpdatedAt = updatedAt)
             dao.upsertEntity(entity)
-            val old = previous[entity.id]
-            if (old == null || old.onState != entity.onState || old.brightness != entity.brightness) {
+            if (old == null || old.onState != entity.onState || old.brightness != entity.brightness || old.available != entity.available) {
                 emitStateChanged(old, entity)
             }
         }
@@ -249,9 +288,11 @@ class HubRepository(
         if (data.has("brightness")) extra.put("brightness", data.getInt("brightness"))
         if (data.has("brightness_pct")) extra.put("brightness", (data.getInt("brightness_pct") * 255) / 100)
         if (data.has("volume_level")) extra.put("volume", (data.getDouble("volume_level") * 100).toInt())
-        val ok = Controllers.execute(device, entity, action, extra)
-        refreshDevice(device.id)
-        return ok
+        return mutexFor(device.id).withLock {
+            val ok = Controllers.execute(device, entity, action, extra)
+            refreshDeviceLocked(device.id)
+            ok
+        }
     }
 
     suspend fun runAutomationActions(id: String) {
@@ -317,7 +358,17 @@ class HubRepository(
         if (entity.kind == EntityKind.MEDIA.name) {
             attributes.put("supported_features", 512 + 256 + 128 + 64)
         }
-        return baseState(haEntityId(entity), if (entity.available) state else "unavailable", entity.name, domain, attributes)
+        val changed = if (entity.lastChangedAt > 0) isoMillis(entity.lastChangedAt) else isoNow()
+        val updated = if (entity.lastUpdatedAt > 0) isoMillis(entity.lastUpdatedAt) else changed
+        return baseState(
+            haEntityId(entity),
+            if (entity.available) state else "unavailable",
+            entity.name,
+            domain,
+            attributes,
+            lastChanged = changed,
+            lastUpdated = updated
+        )
     }
 
     private fun baseState(
@@ -325,16 +376,29 @@ class HubRepository(
         state: String,
         name: String,
         domain: String,
-        attributes: JSONObject = JSONObject().put("friendly_name", name)
+        attributes: JSONObject = JSONObject().put("friendly_name", name),
+        lastChanged: String = isoNow(),
+        lastUpdated: String = lastChanged
     ): JSONObject {
-        val now = isoNow()
         return JSONObject()
             .put("entity_id", entityId)
             .put("state", state)
             .put("attributes", attributes)
-            .put("last_changed", now)
-            .put("last_updated", now)
+            .put("last_changed", lastChanged)
+            .put("last_updated", lastUpdated)
             .put("context", JSONObject().put("id", newId()).put("parent_id", JSONObject.NULL).put("user_id", JSONObject.NULL))
+    }
+
+    suspend fun mqttStateTopics(): List<String> =
+        dao.devices().filter { it.kind == DeviceKind.MQTT.name }
+            .map { parseExtras(it.extrasJson).optString("stateTopic") }
+            .filter { it.isNotBlank() }
+
+    suspend fun refreshMqttByTopic(topic: String) {
+        dao.devices().filter { it.kind == DeviceKind.MQTT.name }.forEach { device ->
+            val extras = parseExtras(device.extrasJson)
+            if (extras.optString("stateTopic") == topic) refreshDevice(device.id)
+        }
     }
 
     suspend fun entityRegistry(): JSONArray {
@@ -510,7 +574,7 @@ class HubRepository(
                     DeviceRow(
                         o.getString("id"), o.getString("kind"), o.getString("name"),
                         o.getString("host"), o.getInt("port"), o.optString("extrasJson", "{}"),
-                        if (o.isNull("roomId")) null else o.optString("roomId"),
+                        Json.optionalId(o, "roomId"),
                         o.optBoolean("favorite", true)
                     )
                 )
@@ -566,6 +630,27 @@ class HubRepository(
 
     companion object {
         fun slug(value: String): String = Text.slug(value)
+
+        fun stamp(
+            old: EntityRow?,
+            newOn: Int?,
+            newBri: Int?,
+            newAvailable: Boolean,
+            now: Long
+        ): Pair<Long, Long> {
+            val changed = old == null ||
+                old.onState != newOn ||
+                old.brightness != newBri ||
+                old.available != newAvailable
+            val lastChanged = if (!changed && old != null && old.lastChangedAt > 0) old.lastChangedAt else now
+            return lastChanged to now
+        }
+
+        fun isoMillis(epochMs: Long): String {
+            val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+            fmt.timeZone = TimeZone.getTimeZone("UTC")
+            return fmt.format(Date(epochMs))
+        }
 
         fun haDomain(entity: EntityRow): String = when (entity.kind) {
             EntityKind.LIGHT.name -> "light"

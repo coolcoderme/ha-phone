@@ -64,6 +64,7 @@ class DiscoveryCoordinator(
             runCatching { ssdpSearch() }
             runCatching { kasaSearch() }
             runCatching { lifxSearch() }
+            runCatching { httpUnicastProbe() }
         }
     }
 
@@ -248,6 +249,24 @@ class DiscoveryCoordinator(
                 } catch (_: Exception) {
                     break
                 }
+            }
+        }
+    }
+
+    /** Unicast HTTP probe for emulator host fakes and the LAN gateway. Not a full /24 sweep. */
+    private fun httpUnicastProbe() {
+        val hosts = linkedSetOf<String>()
+        hosts += "10.0.2.2"
+        io.github.coolcoderme.haphone.net.Lan.ipv4Addresses().forEach { ip ->
+            val prefix = ip.substringBeforeLast(".")
+            hosts += "$prefix.1"
+            hosts += ip
+        }
+        val ports = listOf(80, 8080, 8081, 8082)
+        for (host in hosts) {
+            for (port in ports) {
+                val kind = runCatching { Controllers.probeHttp(host, port) }.getOrNull() ?: continue
+                remember(DiscoveredDevice(kind, "$kind $host", host, port))
             }
         }
     }

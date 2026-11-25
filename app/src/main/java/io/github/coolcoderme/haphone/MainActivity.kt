@@ -6,27 +6,41 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import io.github.coolcoderme.haphone.service.HubService
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var setup: View
     private val app get() = application as HaPhoneApp
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val ioExecutor = Executors.newSingleThreadExecutor()
+    private val loading = AtomicBoolean(false)
+    private var loadAttempts = 0
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -44,17 +58,29 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         webView = findViewById(R.id.webview)
         setup = findViewById(R.id.setup)
+        webView.setBackgroundColor(Color.parseColor("#111111"))
+        webView.setBackgroundResource(android.R.color.transparent)
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        settings.cacheMode = WebSettings.LOAD_NO_CACHE
         if (Build.VERSION.SDK_INT >= 21) {
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
+                view?.setBackgroundColor(Color.parseColor("#111111"))
                 injectAutoLogin()
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                scheduleReload()
+            }
+
+            override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                if (request == null || request.isForMainFrame) scheduleReload()
             }
         }
         webView.webChromeClient = WebChromeClient()
@@ -63,13 +89,24 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_continue).setOnClickListener { requestStartupPermissions() }
         findViewById<TextView>(R.id.setup_title).text = getString(R.string.setup_title)
 
-        HubService.start(this)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                webView.evaluateJavascript(
+                    "(function(){try{return window.HaPhoneUi&&window.HaPhoneUi.onBack&&window.HaPhoneUi.onBack()?'true':'false';}catch(e){return 'false';}})()"
+                ) { result ->
+                    val handled = result == "true" || result == "\"true\""
+                    if (!handled) moveTaskToBack(true)
+                }
+            }
+        })
+
         ContextCompat.registerReceiver(
             this,
             readyReceiver,
             IntentFilter(HubService.ACTION_READY),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        HubService.start(this)
 
         if (!app.prefs.firstLaunchDone) {
             setup.visibility = View.VISIBLE
@@ -82,12 +119,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(readyReceiver) }
+        ioExecutor.shutdownNow()
         super.onDestroy()
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (webView.canGoBack()) webView.goBack() else super.onBackPressed()
     }
 
     private fun requestStartupPermissions() {
@@ -119,8 +152,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadHub() {
+        if (loading.getAndSet(true)) return
         val port = app.prefs.webPort
-        webView.loadUrl("http://127.0.0.1:$port/")
+        ioExecutor.execute {
+            repeat(24) {
+                val connected = runCatching {
+                    Socket().use { socket ->
+                        socket.connect(InetSocketAddress("127.0.0.1", port), 250)
+                    }
+                    true
+                }.getOrDefault(false)
+                if (connected) return@repeat
+                try {
+                    Thread.sleep(250)
+                } catch (_: InterruptedException) {
+                    return@execute
+                }
+            }
+            mainHandler.post {
+                loading.set(false)
+                webView.setBackgroundColor(Color.parseColor("#111111"))
+                webView.loadUrl("http://127.0.0.1:$port/")
+            }
+        }
+    }
+
+    private fun scheduleReload() {
+        if (loadAttempts >= 8) return
+        loadAttempts += 1
+        mainHandler.postDelayed({ loadHub() }, 500L * loadAttempts)
     }
 
     private fun injectAutoLogin() {
@@ -151,6 +211,12 @@ class MainActivity : AppCompatActivity() {
         fun scan() {
             HubService.start(this@MainActivity)
             startService(Intent(this@MainActivity, HubService::class.java).setAction(HubService.ACTION_SCAN))
+        }
+
+        @android.webkit.JavascriptInterface
+        fun mqttReconnect() {
+            HubService.start(this@MainActivity)
+            startService(Intent(this@MainActivity, HubService::class.java).setAction(HubService.ACTION_MQTT_RECONNECT))
         }
 
         @android.webkit.JavascriptInterface

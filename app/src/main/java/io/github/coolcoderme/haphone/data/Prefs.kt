@@ -46,4 +46,14 @@ class Prefs(context: Context) {
     var firstLaunchDone: Boolean
         get() = p.getBoolean("first_launch_done", false)
         set(value) { p.edit().putBoolean("first_launch_done", value).apply() }
+
+    /** Empty means the LAN API is open (no PIN). Off by default. */
+    var lanPin: String
+        get() = p.getString("lan_pin", "") ?: ""
+        set(value) { p.edit().putString("lan_pin", value).apply() }
+
+    /** auto / dark / light */
+    var theme: String
+        get() = p.getString("theme", "auto") ?: "auto"
+        set(value) { p.edit().putString("theme", value).apply() }
 }

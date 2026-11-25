@@ -29,7 +29,7 @@ Local APIs only. Nothing here talks to vendor clouds to log you in.
 | Kind | Discovery | Control | Notes |
 | --- | --- | --- | --- |
 | **WLED** | mDNS `_wled._tcp` + HTTP probe | On/off, brightness | `/json/state` |
-| **Shelly** | mDNS `_http._tcp` probe | Relays / lights | Gen1 HTTP + Gen2 RPC |
+| **Shelly** | mDNS `_http._tcp` probe | Relays / lights | Gen2 `/rpc` then Gen1 `/status` and `/relay/{id}?turn=` |
 | **Tasmota** | HTTP probe | Power / dimmer | `/cm?cmnd=` |
 | **Philips Hue** | mDNS `_hue._tcp` + SSDP | Lights | **Local pairing**: press the bridge button, then Pair. No Hue account. |
 | **TP-Link Kasa** | UDP 9999 broadcast | Plug/bulb | Local XOR protocol |
@@ -39,8 +39,8 @@ Local APIs only. Nothing here talks to vendor clouds to log you in.
 | **ESPHome** | mDNS `_esphomelib._tcp` | Switch if `web_server` is on | Set entity path if needed |
 | **DLNA / UPnP** | SSDP MediaRenderer | Play / pause / stop | |
 | **Chromecast** | mDNS `_googlecast._tcp` | Discovery only | Full Cast needs Google Play Services; skipped so old/AOSP phones still work |
-| **MQTT** | Manual broker | Connection in the hub service | Optional |
-| **Generic HTTP** | Manual | On/off URLs | |
+| **MQTT** | Manual broker + topics | Publish/subscribe light or switch | Settings save reconnects. Add device needs command/state topics |
+| **Generic HTTP** | Manual | On/off/status URLs | Form collects URLs; missing URLs stay unavailable |
 
 Add anything else by IP under **Devices → +**.
 
@@ -50,7 +50,7 @@ Add anything else by IP under **Devices → +**.
 - **Areas** — rooms you name; assign devices when adding or from the device.
 - **Scenes** — snapshot current on/off/brightness and restore later.
 - **Automations** — **time of day** (`07:00`) or **state** (`switch.x` → `on`), then call `turn_on` / `turn_off` / `toggle` on another entity.
-- State lives in a local Room database (survives restarts). **Settings → Backup** exports/imports JSON.
+- State lives in a local Room database (survives restarts and app upgrades via real schema migrations). **Settings → Backup** exports/imports JSON.
 
 ## LAN web UI
 
@@ -60,13 +60,30 @@ While the hub service is running, other devices can open:
 http://PHONE_LAN_IP:8123/
 ```
 
-Same UI as on the phone. Auth is stubbed: **no user is created**. The WebSocket at `/api/websocket` accepts any token (`auth_ok`) so a dropped-in official frontend can skip login.
+Same UI as on the phone.
+
+### Open LAN (default)
+
+**There is no account.** With the default empty PIN, **anyone on the same Wi-Fi has full control**: read states, toggle devices, add/delete, restore backups. REST `/api/*` does not require a bearer token. The WebSocket at `/api/websocket` accepts any token (`auth_ok`) so a dropped-in official frontend can skip login. Responses send `Access-Control-Allow-Origin: *`, so a browser tab on any origin can call the API from this LAN.
+
+This is intentional for a no-account local hub. Treat the phone like an unauthenticated Home Assistant on your LAN.
+
+### Optional LAN PIN
+
+Settings → **LAN PIN**. Off by default. When set:
+
+- Requests from the phone itself (`127.0.0.1`) still work with no PIN.
+- Other LAN clients must send `Authorization: Bearer <PIN>` (REST) or `{ "type": "auth", "access_token": "<PIN>" }` (WebSocket).
+- CORS echoes the request `Origin` instead of `*`.
+- The web UI shows a PIN screen if a call returns 401.
+
+You can also turn off the LAN dashboard entirely (`web_dashboard` in settings / prefs) if you only want the on-phone UI.
 
 ## Architecture
 
 ```
 Android foreground service
-  ├─ Discovery (mDNS, SSDP, Kasa, LIFX)
+  ├─ Discovery (mDNS, SSDP, Kasa, LIFX, short HTTP unicast probe)
   ├─ Poll + device protocols (HTTP / UDP / SOAP)
   ├─ Automations
   ├─ Room DB (devices, entities, areas, scenes, automations)
@@ -137,7 +154,7 @@ MIT for original ha-phone code (see [LICENSE](LICENSE)). Look-and-feel is inspir
 
 Verified in this repo’s environment when the APK job succeeds:
 
-- Gradle **unit tests** for Kasa codec, LIFX header size, SSDP parse, name slug.
+- Gradle **unit tests** for Kasa codec, LIFX header size, SSDP parse, name slug, Shelly gen1/gen2 JSON, generic HTTP URL rules, last_changed stamps, JSON `roomId` null, Room v1→v2 migration SQL, and the coroutines `ClassValue` rewrite.
 - **APK build** (size reported on the PR / Actions log).
 
 Not verified here (no Android emulator / no real IoT hardware in this environment):

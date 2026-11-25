@@ -39,6 +39,7 @@ class ProtocolTest {
     fun slugSanitizesNames() {
         assertEquals("living_room", Text.slug("Living Room"))
         assertEquals("hue_bridge", Text.slug("Hue Bridge!!"))
+        assertEquals("", Text.slug(""))
     }
 
     @Test

@@ -14,6 +14,8 @@ class HaPhoneApp : Application() {
         private set
 
     override fun onCreate() {
+        // kotlinx.coroutines 1.7+ probes java.lang.ClassValue, which Android 8 does not have.
+        System.setProperty("kotlinx.coroutines.internal.useClassValue", "false")
         super.onCreate()
         instance = this
         prefs = Prefs(this)
@@ -22,6 +24,10 @@ class HaPhoneApp : Application() {
     }
 
     companion object {
+        init {
+            System.setProperty("kotlinx.coroutines.internal.useClassValue", "false")
+        }
+
         lateinit var instance: HaPhoneApp
             private set
     }

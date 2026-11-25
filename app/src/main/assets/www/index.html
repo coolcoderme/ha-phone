@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <meta name="theme-color" content="#1c1c1c"/>
-  <title>Home Assistant</title>
+  <meta name="theme-color" content="#111111"/>
+  <title>ha-phone</title>
   <link rel="icon" href="/static/logo.svg"/>
-  <link rel="stylesheet" href="/static/app.css"/>
+  <link rel="stylesheet" href="/static/app.css?v=0.3.0"/>
 </head>
 <body>
   <div id="app">
@@ -14,8 +14,8 @@
       <div class="side-brand" id="brand">
         <img class="brand-mark" src="/static/logo.svg" alt=""/>
         <div>
-          <div class="brand-title" id="brandTitle">Home Assistant</div>
-          <div class="brand-sub" id="brandSub">ha-phone</div>
+          <div class="brand-title" id="brandTitle">ha-phone</div>
+          <div class="brand-sub" id="brandSub">Local hub</div>
         </div>
       </div>
       <nav id="nav"></nav>
@@ -33,6 +33,15 @@
   <div id="dialog" class="hidden">
     <div class="dialog-card" id="dialogCard"></div>
   </div>
-  <script src="/static/app.js"></script>
+  <div id="pinGate" class="hidden">
+    <div class="pin-card ha-card">
+      <h2>LAN PIN</h2>
+      <p class="muted">This hub requires a PIN from other devices on the network. The phone itself does not.</p>
+      <input class="field" id="pinInput" type="password" placeholder="PIN"/>
+      <div class="error hidden" id="pinError">Wrong PIN</div>
+      <div class="row-actions"><button class="btn" id="pinSubmit">Unlock</button></div>
+    </div>
+  </div>
+  <script src="/static/app.js?v=0.3.0"></script>
 </body>
 </html>

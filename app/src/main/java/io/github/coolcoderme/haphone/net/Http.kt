@@ -3,6 +3,7 @@ package io.github.coolcoderme.haphone.net
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.wifi.WifiManager
+import android.util.Log
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -13,60 +14,94 @@ import java.net.NetworkInterface
 import java.util.concurrent.TimeUnit
 
 object Http {
+    private const val TAG = "HaPhoneHttp"
+
     val client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(4, TimeUnit.SECONDS)
         .readTimeout(6, TimeUnit.SECONDS)
         .writeTimeout(6, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(false)
+        .retryOnConnectionFailure(true)
+        .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.MILLISECONDS))
+        .addNetworkInterceptor { chain ->
+            val request = chain.request().newBuilder()
+                .header("Connection", "close")
+                .build()
+            chain.proceed(request)
+        }
         .build()
 
-    private val jsonType = "application/json; charset=utf-8".toMediaType()
+    data class Result(val code: Int, val body: String?) {
+        val ok: Boolean get() = code in 200..299
+    }
+
+    fun exchange(
+        url: String,
+        method: String = "GET",
+        body: String? = null,
+        contentType: String = "application/json",
+        headers: Map<String, String> = emptyMap()
+    ): Result {
+        return runCatching {
+            val builder = Request.Builder().url(url)
+            headers.forEach { builder.header(it.key, it.value) }
+            when (method) {
+                "GET" -> builder.get()
+                "POST" -> builder.post((body ?: "").toRequestBody(contentType.toMediaType()))
+                "PUT" -> builder.put((body ?: "").toRequestBody(contentType.toMediaType()))
+                else -> builder.method(method, body?.toRequestBody(contentType.toMediaType()))
+            }
+            client.newCall(builder.build()).execute().use { response ->
+                // Always consume the body so a 404 does not stall the next call.
+                Result(response.code, response.body?.string())
+            }
+        }.onFailure {
+            Log.w(TAG, "$method $url failed", it)
+        }.getOrDefault(Result(-1, null))
+    }
 
     fun get(url: String, headers: Map<String, String> = emptyMap()): String? {
-        val builder = Request.Builder().url(url)
-        headers.forEach { builder.header(it.key, it.value) }
-        return runCatching {
-            client.newCall(builder.build()).execute().use { response ->
-                if (!response.isSuccessful) null else response.body?.string()
-            }
-        }.getOrNull()
+        val result = exchange(url, headers = headers)
+        return if (result.ok) result.body else null
     }
 
     fun getCode(url: String): Pair<Int, String?> {
-        return runCatching {
-            client.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                response.code to response.body?.string()
-            }
-        }.getOrDefault(-1 to null)
+        val result = exchange(url)
+        return result.code to result.body
     }
 
     fun post(url: String, body: String, contentType: String = "application/json"): String? {
-        val media = contentType.toMediaType()
-        val request = Request.Builder()
-            .url(url)
-            .post(body.toRequestBody(media))
-            .build()
-        return runCatching {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) null else response.body?.string()
-            }
-        }.getOrNull()
+        val result = exchange(url, method = "POST", body = body, contentType = contentType)
+        return if (result.ok) result.body else null
     }
 
+    fun postCode(url: String, body: String, contentType: String = "application/json"): Result =
+        exchange(url, method = "POST", body = body, contentType = contentType)
+
     fun putJson(url: String, json: JSONObject): String? {
-        val request = Request.Builder()
-            .url(url)
-            .put(json.toString().toRequestBody(jsonType))
-            .build()
-        return runCatching {
-            client.newCall(request).execute().use { response ->
-                response.body?.string()
-            }
-        }.getOrNull()
+        val result = exchange(url, method = "PUT", body = json.toString(), contentType = "application/json")
+        return if (result.ok) result.body else result.body
     }
 
     fun postJson(url: String, json: JSONObject): String? =
         post(url, json.toString(), "application/json")
+
+    fun postJsonCode(url: String, json: JSONObject): Result =
+        postCode(url, json.toString(), "application/json")
+
+    private val probeClient: OkHttpClient = client.newBuilder()
+        .connectTimeout(400, TimeUnit.MILLISECONDS)
+        .readTimeout(400, TimeUnit.MILLISECONDS)
+        .writeTimeout(400, TimeUnit.MILLISECONDS)
+        .build()
+
+    fun probe(url: String): String? {
+        return runCatching {
+            probeClient.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+                val body = response.body?.string()
+                if (response.isSuccessful) body else null
+            }
+        }.getOrNull()
+    }
 }
 
 object Lan {

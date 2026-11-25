@@ -1,5 +1,6 @@
 package io.github.coolcoderme.haphone.control
 
+import android.util.Log
 import io.github.coolcoderme.haphone.data.db.DeviceRow
 import io.github.coolcoderme.haphone.data.db.EntityRow
 import io.github.coolcoderme.haphone.data.model.DeviceKind
@@ -29,6 +30,8 @@ data class RefreshResult(
 )
 
 object Controllers {
+    private const val TAG = "Controllers"
+
     suspend fun refresh(device: DeviceRow): RefreshResult? {
         return runCatching {
             when (DeviceKind.fromStorage(device.kind)) {
@@ -43,8 +46,11 @@ object Controllers {
                 DeviceKind.ESPHOME -> refreshEsphome(device)
                 DeviceKind.DLNA, DeviceKind.CHROMECAST -> refreshMediaPlaceholder(device)
                 DeviceKind.GENERIC_HTTP -> refreshGeneric(device)
-                DeviceKind.MQTT, DeviceKind.UNKNOWN -> null
+                DeviceKind.MQTT -> refreshMqtt(device)
+                DeviceKind.UNKNOWN -> null
             }
+        }.onFailure {
+            Log.w(TAG, "refresh ${device.kind} ${device.host}:${device.port}", it)
         }.getOrNull()
     }
 
@@ -62,24 +68,27 @@ object Controllers {
                 DeviceKind.ESPHOME -> execEsphome(device, entity, action)
                 DeviceKind.DLNA -> execDlna(device, action)
                 DeviceKind.GENERIC_HTTP -> execGeneric(device, action)
-                DeviceKind.CHROMECAST, DeviceKind.MQTT, DeviceKind.UNKNOWN -> false
+                DeviceKind.MQTT -> execMqtt(device, action)
+                DeviceKind.CHROMECAST, DeviceKind.UNKNOWN -> false
             }
+        }.onFailure {
+            Log.w(TAG, "execute ${device.kind} $action ${device.host}", it)
         }.getOrDefault(false)
     }
 
     fun probeHttp(host: String, port: Int): DeviceKind? {
         val base = "http://$host:$port"
-        val wled = Http.get("$base/json/info")
+        val wled = Http.probe("$base/json/info")
         if (wled != null && wled.contains("\"brand\"") && wled.contains("WLED")) return DeviceKind.WLED
-        val shelly = Http.get("$base/shelly") ?: Http.get("$base/rpc/Shelly.GetDeviceInfo")
+        val shelly = Http.probe("$base/shelly") ?: Http.probe("$base/rpc/Shelly.GetDeviceInfo")
         if (shelly != null && (shelly.contains("\"type\"") || shelly.contains("\"id\"") || shelly.contains("Shelly"))) {
             return DeviceKind.SHELLY
         }
-        val tasmota = Http.get("$base/cm?cmnd=Status")
+        val tasmota = Http.probe("$base/cm?cmnd=Status")
         if (tasmota != null && tasmota.contains("Status") && tasmota.contains("FriendlyName")) return DeviceKind.TASMOTA
-        val hue = Http.get("$base/api/0/config") ?: Http.get("$base/api/config")
+        val hue = Http.probe("$base/api/0/config") ?: Http.probe("$base/api/config")
         if (hue != null && hue.contains("bridgeid") && hue.contains("Philips")) return DeviceKind.HUE
-        val esphome = Http.get(base)
+        val esphome = Http.probe(base)
         if (esphome != null && (esphome.contains("ESPHome", true) || esphome.contains("esphome", true))) {
             return DeviceKind.ESPHOME
         }
@@ -107,13 +116,15 @@ object Controllers {
     )
 
     private fun refreshWled(device: DeviceRow): RefreshResult {
-        val state = JSONObject(Http.get("http://${device.host}:${device.port}/json/state") ?: "{}")
+        val stateBody = Http.get("http://${device.host}:${device.port}/json/state")
+        val available = stateBody != null
+        val state = JSONObject(stateBody ?: "{}")
         val info = JSONObject(Http.get("http://${device.host}:${device.port}/json/info") ?: "{}")
-        val on = state.optBoolean("on", false)
-        val bri = state.optInt("bri", 0)
-        val name = info.optString("name", device.name)
+        val on = if (available) state.optBoolean("on", false) else null
+        val bri = if (available) state.optInt("bri", 0) else null
+        val name = info.optString("name", device.name).ifBlank { device.name }
         return RefreshResult(
-            listOf(entity(device, "light", EntityKind.LIGHT, name, true, on, bri))
+            listOf(entity(device, "light", EntityKind.LIGHT, name, available, on, bri))
         )
     }
 
@@ -136,58 +147,37 @@ object Controllers {
     }
 
     private fun refreshShelly(device: DeviceRow): RefreshResult {
-        val gen2 = Http.get("http://${device.host}:${device.port}/rpc/Shelly.GetStatus")
-        if (gen2 != null) {
-            val json = JSONObject(gen2)
-            val entities = mutableListOf<EntityRow>()
-            json.keys().forEach { key ->
-                if (key.startsWith("switch:")) {
-                    val sw = json.getJSONObject(key)
-                    val id = key.substringAfter(":")
-                    entities += entity(
-                        device, "switch$id", EntityKind.SWITCH,
-                        "${device.name} switch $id", true, sw.optBoolean("output", false)
-                    )
-                }
-                if (key.startsWith("light:")) {
-                    val light = json.getJSONObject(key)
-                    val id = key.substringAfter(":")
-                    entities += entity(
-                        device, "light$id", EntityKind.LIGHT,
-                        "${device.name} light $id", true,
-                        light.optBoolean("output", false),
-                        light.optInt("brightness", 0)
-                    )
-                }
+        val gen2 = Http.exchange("http://${device.host}:${device.port}/rpc/Shelly.GetStatus")
+        if (gen2.ok && !gen2.body.isNullOrBlank()) {
+            val json = runCatching { JSONObject(gen2.body) }.getOrNull()
+            if (json != null && ShellyJson.looksLikeGen2(json)) {
+                val channels = ShellyJson.gen2Channels(json)
+                if (channels.isNotEmpty()) return RefreshResult(channels.map { it.toEntity(device) })
             }
-            if (entities.isEmpty()) {
-                entities += entity(device, "switch0", EntityKind.SWITCH, device.name, true, false)
+        }
+        val gen1 = Http.exchange("http://${device.host}:${device.port}/status")
+        if (gen1.ok && !gen1.body.isNullOrBlank()) {
+            val json = runCatching { JSONObject(gen1.body) }.getOrNull()
+            if (json != null && (ShellyJson.looksLikeGen1(json) || ShellyJson.gen1Channels(json).isNotEmpty())) {
+                val channels = ShellyJson.gen1Channels(json)
+                if (channels.isNotEmpty()) return RefreshResult(channels.map { it.toEntity(device) })
+                return RefreshResult(listOf(entity(device, "relay0", EntityKind.SWITCH, device.name, true, false)))
             }
-            return RefreshResult(entities)
         }
-        val gen1 = Http.get("http://${device.host}:${device.port}/status") ?: return RefreshResult(
-            listOf(entity(device, "switch0", EntityKind.SWITCH, device.name, false, null))
-        )
-        val json = JSONObject(gen1)
-        val relays = json.optJSONArray("relays") ?: JSONArray()
-        val entities = mutableListOf<EntityRow>()
-        for (i in 0 until relays.length()) {
-            val relay = relays.getJSONObject(i)
-            entities += entity(device, "relay$i", EntityKind.SWITCH, "${device.name} $i", true, relay.optBoolean("ison"))
-        }
-        val lights = json.optJSONArray("lights") ?: JSONArray()
-        for (i in 0 until lights.length()) {
-            val light = lights.getJSONObject(i)
-            entities += entity(
-                device, "light$i", EntityKind.LIGHT, "${device.name} light $i", true,
-                light.optBoolean("ison"), light.optInt("brightness", 0)
-            )
-        }
-        if (entities.isEmpty()) {
-            entities += entity(device, "switch0", EntityKind.SWITCH, device.name, true, false)
-        }
-        return RefreshResult(entities)
+        Log.i(TAG, "Shelly ${device.host} unreachable (gen2=${gen2.code} gen1=${gen1.code})")
+        return RefreshResult(listOf(entity(device, "relay0", EntityKind.SWITCH, device.name, false, null)))
     }
+
+    private fun ShellyJson.Channel.toEntity(device: DeviceRow) = entity(
+        device,
+        suffix,
+        if (kind == "LIGHT") EntityKind.LIGHT else EntityKind.SWITCH,
+        if (suffix.endsWith("0") && suffix.removeSuffix("0") in listOf("switch", "relay", "light")) device.name
+        else "${device.name} ${suffix.filter { it.isDigit() }}",
+        true,
+        on,
+        brightness
+    )
 
     private fun execShelly(device: DeviceRow, entity: EntityRow, action: String): Boolean {
         val on = when (action) {
@@ -196,22 +186,25 @@ object Controllers {
             "toggle" -> null
             else -> return false
         }
-        val id = entity.id.substringAfterLast(":").filter { it.isDigit() }.ifBlank { "0" }
-        val gen2 = Http.postJson(
-            "http://${device.host}:${device.port}/rpc",
-            JSONObject()
-                .put("id", 1)
-                .put("method", "Switch.Set")
-                .put("params", JSONObject().put("id", id.toInt()).put("on", on ?: JSONObject.NULL))
-        )
-        if (gen2 != null) return true
+        val id = ShellyJson.channelIndex(entity.id.substringAfterLast(":"))
+        val rpcBody = JSONObject()
+            .put("id", 1)
+            .put("method", if (entity.kind == EntityKind.LIGHT.name) "Light.Set" else "Switch.Set")
+            .put("params", JSONObject().put("id", id.toInt()).put("on", on ?: JSONObject.NULL))
+        val rpc = Http.postJsonCode("http://${device.host}:${device.port}/rpc", rpcBody)
+        if (rpc.ok) return true
+        Log.i(TAG, "Shelly gen2 Switch.Set ${rpc.code}, falling back to gen1 /relay")
         val turn = when (on) {
             true -> "on"
             false -> "off"
             null -> "toggle"
         }
-        val path = if (entity.kind == EntityKind.LIGHT.name) "light" else "relay"
-        return Http.get("http://${device.host}:${device.port}/$path/$id?turn=$turn") != null
+        val preferred = if (entity.kind == EntityKind.LIGHT.name) "light" else "relay"
+        val first = Http.exchange("http://${device.host}:${device.port}/$preferred/$id?turn=$turn")
+        if (first.ok) return true
+        val secondPath = if (preferred == "relay") "light" else "relay"
+        val second = Http.exchange("http://${device.host}:${device.port}/$secondPath/$id?turn=$turn")
+        return second.ok
     }
 
     private fun refreshTasmota(device: DeviceRow): RefreshResult {
@@ -436,18 +429,61 @@ object Controllers {
     }
 
     private fun refreshMediaPlaceholder(device: DeviceRow): RefreshResult {
+        val available = device.host.isNotBlank()
         return RefreshResult(
-            listOf(entity(device, "player", EntityKind.MEDIA, device.name, true, null, extra = JSONObject().put("note", "Discovered on LAN")))
+            listOf(entity(device, "player", EntityKind.MEDIA, device.name, available, null, extra = JSONObject().put("note", "Discovered on LAN")))
         )
     }
 
     private fun refreshGeneric(device: DeviceRow): RefreshResult {
         val extras = parseExtras(device.extrasJson)
+        if (GenericHttp.missingUrls(extras)) {
+            return RefreshResult(listOf(entity(device, "main", EntityKind.SWITCH, device.name, false, null)))
+        }
         val status = extras.optString("statusUrl")
-        val body = if (status.isNotBlank()) Http.get(status.replace("{host}", device.host)) else "ok"
-        val onHint = extras.optString("onContains")
-        val on = if (body != null && onHint.isNotBlank()) body.contains(onHint) else body != null
-        return RefreshResult(listOf(entity(device, "main", EntityKind.SWITCH, device.name, body != null, on)))
+        val body = if (status.isNotBlank()) Http.get(status.replace("{host}", device.host)) else null
+        val available = if (status.isNotBlank()) body != null else true
+        val on = GenericHttp.statusOn(body ?: if (status.isBlank()) "" else null, extras)
+        return RefreshResult(listOf(entity(device, "main", EntityKind.SWITCH, device.name, available, on)))
+    }
+
+    private fun refreshMqtt(device: DeviceRow): RefreshResult {
+        val extras = parseExtras(device.extrasJson)
+        val stateTopic = extras.optString("stateTopic")
+        val commandTopic = extras.optString("commandTopic")
+        val onPayload = extras.optString("onPayload").ifBlank { "ON" }
+        val kind = if (extras.optString("kind").equals("light", true)) EntityKind.LIGHT else EntityKind.SWITCH
+        if (stateTopic.isBlank() && commandTopic.isBlank()) {
+            return RefreshResult(listOf(entity(device, "main", kind, device.name, false, null)))
+        }
+        if (stateTopic.isNotBlank()) MqttBridge.subscribe(stateTopic)
+        val last = if (stateTopic.isNotBlank()) MqttBridge.lastPayload(stateTopic) else null
+        val connected = MqttBridge.isConnected()
+        val on = when {
+            last == null -> null
+            last.equals(onPayload, true) || last == "1" || last.equals("true", true) -> true
+            else -> false
+        }
+        val available = connected && (stateTopic.isBlank() || last != null || commandTopic.isNotBlank())
+        return RefreshResult(listOf(entity(device, "main", kind, device.name, available, on)))
+    }
+
+    private fun execMqtt(device: DeviceRow, action: String): Boolean {
+        val extras = parseExtras(device.extrasJson)
+        val commandTopic = extras.optString("commandTopic")
+        if (commandTopic.isBlank()) return false
+        val onPayload = extras.optString("onPayload").ifBlank { "ON" }
+        val offPayload = extras.optString("offPayload").ifBlank { "OFF" }
+        val payload = when (action) {
+            "turn_on" -> onPayload
+            "turn_off" -> offPayload
+            "toggle" -> {
+                val last = extras.optString("stateTopic").let { MqttBridge.lastPayload(it) }
+                if (last != null && last.equals(onPayload, true)) offPayload else onPayload
+            }
+            else -> return false
+        }
+        return MqttBridge.publish(commandTopic, payload)
     }
 
     private fun execGeneric(device: DeviceRow, action: String): Boolean {
