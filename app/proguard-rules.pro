@@ -1,0 +1,3 @@
+-keep class io.github.coolcoderme.haphone.** { *; }
+-dontwarn org.eclipse.paho.**
+-dontwarn fi.iki.elonen.**

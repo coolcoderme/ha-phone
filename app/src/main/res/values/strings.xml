@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ha-phone</string>
+    <string name="notification_title">ha-phone hub</string>
+    <string name="notification_text">Local hub is running on this phone</string>
+    <string name="setup_title">Welcome home</string>
+    <string name="setup_body">This phone is the hub. No account is created. Grant location so the app can see your Wi-Fi and discover devices on the LAN, then optionally disable battery optimization so automations keep running.</string>
+    <string name="setup_continue">Continue</string>
+</resources>

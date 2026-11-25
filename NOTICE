@@ -1,0 +1,19 @@
+ha-phone includes original code under the MIT license (see LICENSE).
+
+The local user interface is an independent implementation that follows the
+look of the open-source Home Assistant frontend (Apache License 2.0):
+
+    https://github.com/home-assistant/frontend
+
+Home Assistant, the Home Assistant name, and the Home Assistant logo are
+trademarks of the Home Assistant project / Nabu Casa. This repository does
+not ship those trademarks. The default icon is a generic house-on-blue mark
+that you can replace for personal use (see README.md).
+
+If you drop the official Apache-2.0 Home Assistant frontend build into
+app/src/main/assets/ha_frontend/, that frontend's NOTICE and LICENSE apply
+to those files. The hub still serves a stub auth token so the UI can load
+without creating an account.
+
+This project is not affiliated with, endorsed by, or maintained by the
+Home Assistant project.

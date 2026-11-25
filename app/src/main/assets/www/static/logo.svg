@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <!-- Default brand mark. Not the Home Assistant trademark. Swap this file to use official HA artwork locally. -->
+  <rect width="108" height="108" fill="#03A9F4"/>
+  <path fill="#fff" d="M54 28l24 22h-6v26H36V50h-6z"/>
+  <rect x="50" y="58" width="8" height="18" fill="#03A9F4"/>
+</svg>
